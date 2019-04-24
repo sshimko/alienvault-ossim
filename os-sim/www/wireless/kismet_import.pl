@@ -40,6 +40,7 @@ if ($numproc>1) {
 #
 use DBI;
 use Date::Manip;
+use Data::Dumper;
 local $ENV{XML_SIMPLE_PREFERRED_PARSER} = "XML::Parser";
 use XML::Simple;
 use Time::HiRes;
@@ -63,7 +64,7 @@ $parseddir = "$maindir/parsed";
 #$dbdir = "$maindir/db";
 $sensor = 0;
 my %sensors = ();
-#0die "Needs xml input directory with files like kismet_XXX.XXX.XXX.XXX_YYYYMMDD.xml\n" if(!$maindir);
+#0die "Needs xml input directory with files like kismet_XXX.XXX.XXX.XXX_YYYYMMDD.netxml\n" if(!$maindir);
 die "$maindir is not a directory\n" if (!-d $maindir);
 
 my $t1 = Time::HiRes::time();
@@ -92,7 +93,7 @@ get_aps_macs_and_clients($dbh);
 $dbh->disconnect;
 
 $file = "";
-@files = `ls -1t $workdir/*/*.xml 2> /dev/null`;
+@files = `ls -1t $workdir/*/*.netxml 2> /dev/null`;
 foreach $file (@files) {
     $file =~ s/\n|\r|\t//g;
     if ($file =~ /(\d+\.\d+\.\d+\.\d+).*/) {
@@ -126,7 +127,7 @@ foreach $file (@files) {
             print "Processing $file (pid:$pid)\n";
         }
     } else {
-        print "Skiping $file: incorrect name format XXX.XXX.XXX.XXX_YYYYMMDD-N.xml\n";
+        print "Skiping $file: incorrect name format XXX.XXX.XXX.XXX_YYYYMMDD-N.netxml\n";
     }
 }
 
@@ -165,9 +166,58 @@ sub parse_xml {
       push(@items,$xml->{'wireless-network'});
     }
     foreach my $net (@items) {
-        $ssid = $net->{'SSID'};
-        #$ssid = "<no ssid>" if ($ssid eq "");
-        next if ($ssid =~ /\\/ || $ssid eq "");
+	# SRS: kismet xml format changed?
+	# This now stores the string representation of the *type* and object reference they refer to, e.g.
+	#  'HASH (0xFOOBOOBA)' or 
+	#  'ARRAY (0x....)' 
+        #$ssid = $net->{'SSID'};
+	print "Network Number: " . ${net}->{'number'} . "\n" if ($debug);
+	print "Network Type: " . ${net}->{'type'} . "\n" if ($debug);
+	# SRS: ignore probes for now. They're interesting, but pollute the stats
+	# when in a very active wireless environment.
+	if (${net}->{'type'} eq 'probe') {
+		print "Skipping client SSID probe.\n" if ($debug); 
+		next;
+	}
+
+	$ssid = "";
+
+	# SRS: OSSIM's kismet logic doesnt expect on AP to broadcast multiple SSIDs
+	# which can occur, not just when one *does* do that, but also when clients are probing for hidden networks
+	# as you end up with one SSID for the hidden beacon and one for the probe with the real SSID in the essid field.
+	# But kismet's entire log format changed so I'm not about to fix this completely, so just pick the first real SSID
+        if (ref($net->{'SSID'}) eq 'ARRAY') {
+		print "One AP with multiple SSIDs found, last one will be used.\n" if ($debug);
+		foreach my $s (@{$net->{'SSID'}}) {
+			next if not exists $s->{'essid'};
+			print "   Nested SSID $s->{'essid'}->{'content'}\n" if ($debug);
+			$ssid = $s->{'essid'}->{'content'};
+        		$cloaked = ($s->{'essid'}->{'cloaked'} eq 'false') ? "No" : "Yes";
+        		$maxrate = $s->{'max-rate'};
+			if (ref($s->{'encryption'}) eq 'ARRAY') {
+			    $encryption = join(",",@{$s->{'encryption'}});
+			} else {
+			    $encryption = $s->{'encryption'};
+			}
+			last;
+		}
+	} elsif (ref($net->{'SSID'}->{'essid'}) eq 'HASH') {
+        	$ssid = $net->{'SSID'}->{'essid'}->{'content'};
+        	$maxrate = $net->{'SSID'}->{'max-rate'};
+		if (ref($net->{'SSID'}->{'encryption'}) eq 'ARRAY') {
+		    $encryption = join(",",@{$net->{'SSID'}->{'encryption'}});
+		} else {
+		    $encryption = $net->{'SSID'}->{'encryption'};
+		}
+        	$cloaked = ($net->{'SSID'}->{'essid'}->{'cloaked'} eq 'false') ? "No" : "Yes";
+	} 
+	
+	# fall back to using BSSID if no ssid found and assume cloaked
+	if ($ssid eq "" ) {
+        	$ssid = "zzCloaked_" . $net->{'BSSID'};
+		$cloaked = "Yes";
+	}
+
         $ssid1 = quotemeta $ssid;
         if ($filter_ssid_characters) {
             next if ($ssid =~ /\[/);
@@ -183,19 +233,18 @@ sub parse_xml {
             next if ($ssid =~ /\|/);
             next if ($ssid =~ /eCO`p/);
         }
-        print "SSID: $ssid1\n" if ($debug);
+	print "Found SSID: $ssid\n" if ($debug);
+	print "Encryption: $encryption\n" if ($debug);
         $nettype = $net->{'type'};
         $mac = $net->{'BSSID'};
         $info = "";
         $channel = $net->{'channel'};
-        $cloaked = ($net->{'cloaked'} eq 'false') ? "No" : "Yes";
-        if (ref($net->{'encryption'}) eq 'ARRAY') {
-            $encryption = join(",",@{$net->{'encryption'}});
-        } else {
-            $encryption = $net->{'encryption'};
-        }
+        #if (ref($net->{'encryption'}) eq 'ARRAY') {
+        #    $encryption = join(",",@{$net->{'encryption'}});
+        #} else {
+        #    $encryption = $net->{'encryption'};
+        #}
         $decrypted = "";
-        $maxrate = $net->{'maxrate'};
         $maxseenrate = $net->{'maxseenrate'};
         $beacon = $net->{'packets'}->{'beacon'};
         $llc = $net->{'packets'}->{'LLC'};
@@ -285,14 +334,14 @@ sub parse_xml {
                 $plugin_sid = 0;
                 $maxrate = $cl->{'client-maxrate'};
                 $maxseenrate = $cl->{'client-maxseenrate'};
-                $llc = $cl->{'client-packets'}->{'client-LLC'};
-                $data = $cl->{'client-packets'}->{'client-data'};
-                $crypt = $cl->{'client-packets'}->{'client-crypt'};
-                $weak = $cl->{'client-packets'}->{'client-weak'};
-                $dupeiv = $cl->{'client-packets'}->{'client-dupeiv'};
-                $total = $cl->{'client-packets'}->{'client-total'};
+                $llc = $cl->{'packets'}->{'LLC'};
+                $data = $cl->{'packets'}->{'data'};
+                $crypt = $cl->{'packets'}->{'crypt'};
+                $weak = '0'; #$cl->{'packets'}->{'client-weak'};
+                $dupeiv = '0'; #$cl->{'packets'}->{'client-dupeiv'};
+                $total = $cl->{'packets'}->{'total'};
                 $encoding = ($cl->{'wep'} eq "false") ? "No" : "Yes";
-                $datasize = $cl->{'client-datasize'};
+                $datasize = $cl->{'datasize'};
                 $firsttime = $cl->{'first-time'};
                 $lasttime = $cl->{'last-time'};
                 $gpsminlat = $cl->{'client-gps-info'}->{'client-min-lat'};

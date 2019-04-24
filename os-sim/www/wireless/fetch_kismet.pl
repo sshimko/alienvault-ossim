@@ -79,14 +79,14 @@ foreach $ip (keys %sites) {
    mkdir $work_dir, 0755;
    print "old:$old_dir, work=$work_dir\n";
 
-   $last_filename = `ls -ltr '$old_dir/'*'.xml' | awk '{print \$9}' | perl -npe 's/.*\\///g' | head -n 1`; chomp($last_filename);
+   $last_filename = `ls -ltr '$old_dir/'*'.netxml' | awk '{print \$9}' | perl -npe 's/.*\\///g' | head -n 1`; chomp($last_filename);
 
    $filename=`ssh -o StrictHostKeyChecking=no $ip "cd $location; ls -ltr *.xml;" | awk '{ print \$9 }'`; chomp($filename);
    @removefiles = split(/\n/,$filename);
    $lastremote = $removefiles[$#removefiles];
 
    print "Copying from $ip:$location\n";
-   system("scp -o StrictHostKeyChecking=no -p $ip:$location/$ip*.xml $work_dir");
+   system("scp -o StrictHostKeyChecking=no -p $ip:$location/$ip*.netxml $work_dir");
 
    $now = localtime; $now =~ s/\s+/_/g;
 
